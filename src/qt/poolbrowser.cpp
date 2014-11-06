@@ -1,0 +1,1221 @@
+#include "poolbrowser.h"
+#include "ui_poolbrowser.h"
+#include "main.h"
+#include "wallet.h"
+#include "base58.h"
+#include "clientmodel.h"
+#include "bitcoinrpc.h"
+
+#include <sstream>
+#include <string>
+
+#include <QDesktopServices>
+#include <QString>
+#include <QSslSocket>
+#include <QJsonArray>
+#include <QJsonObject>
+#include <QJsonValue>
+
+using namespace json_spirit;
+
+//Coinbase API
+const QString apiCoinbasePrice = "http://104.236.34.234/coinbase/exchange_rates.php";
+
+//Bittrex API
+const QString apiBittrexMarketSummary = "http://104.236.34.234/bittrex/market.php";
+const QString apiBittrexTrades = "http://104.236.34.234/bittrex/trades.php";
+const QString apiBittrexOrders = "http://104.236.34.234/bittrex/orders.php";
+
+//Poloniex API
+const QString apiPoloniexMarketSummary = "http://104.236.34.234/poloniex/market.php";
+const QString apiPoloniex24hVolume = "http://104.236.34.234/poloniex/chartdata.php";
+const QString apiPoloniexTrades = "http://104.236.34.234/poloniex/trades.php";
+const QString apiPoloniexOrders = "http://104.236.34.234/poloniex/orders.php";
+
+//Cryptsy API
+const QString apiCryptsyTrades = "http://104.236.34.234/cryptsy/trades.php";
+const QString apiCryptsyOrders = "http://104.236.34.234/cryptsy/orders.php";
+
+//Common Globals
+double _dScPriceLast = 0;
+double _dBtcPriceCurrent = 0;
+double _dBtcPriceLast = 0;
+
+//Bittrex Globals
+BittrexMarketSummary* _bittrexMarketSummary = new BittrexMarketSummary();
+BittrexTrades* _bittrexTrades = new BittrexTrades();
+BittrexOrders* _bittrexOrders = new BittrexOrders();
+
+//Poloniex Globals
+PoloniexMarketSummary* _poloniexMarketSummary = new PoloniexMarketSummary();
+Poloniex24hVolume* _poloninex24hVolume = new Poloniex24hVolume();
+PoloniexTrades* _poloniexTrades = new PoloniexTrades();
+PoloniexOrders* _poloniexOrders = new PoloniexOrders();
+
+//Cryptsy Globals
+CryptsyTrades* _cryptsyTrades = new CryptsyTrades();
+CryptsyOrders* _cryptsyOrders = new CryptsyOrders();
+
+PoolBrowser::PoolBrowser(QWidget* parent) : QWidget(parent), ui(new Ui::PoolBrowser) {
+    //TODO: Complete multi-threading so we don't have to call this as a primer
+    getRequest(apiCoinbasePrice);
+
+    ui->setupUi(this);
+    setFixedSize(400, 420);
+
+    ui->qCustomPlotBittrexTrades->addGraph();
+    ui->qCustomPlotBittrexTrades->setBackground(QBrush(QColor("#edf1f7")));
+
+    ui->qCustomPlotBittrexOrderDepth->addGraph();
+    ui->qCustomPlotBittrexOrderDepth->addGraph();
+    ui->qCustomPlotBittrexOrderDepth->setBackground(QBrush(QColor("#edf1f7")));
+
+    ui->qCustomPlotPoloniexTrades->addGraph();
+    ui->qCustomPlotPoloniexTrades->setBackground(QBrush(QColor("#edf1f7")));
+
+    ui->qCustomPlotPoloniexOrderDepth->addGraph();
+    ui->qCustomPlotPoloniexOrderDepth->addGraph();
+    ui->qCustomPlotPoloniexOrderDepth->setBackground(QBrush(QColor("#edf1f7")));
+
+    ui->qCustomPlotCryptsyTrades->addGraph();
+    ui->qCustomPlotCryptsyTrades->setBackground(QBrush(QColor("#edf1f7")));
+
+    ui->qCustomPlotCryptsyOrderDepth->addGraph();
+    ui->qCustomPlotCryptsyOrderDepth->addGraph();
+    ui->qCustomPlotCryptsyOrderDepth->setBackground(QBrush(QColor("#edf1f7")));
+
+    QObject::connect(&m_nam, SIGNAL(finished(QNetworkReply*)), this, SLOT(parseNetworkResponse(QNetworkReply*)), Qt::AutoConnection);
+
+    //One time primer
+    pollAPIs();
+}
+
+void PoolBrowser::on_btnConvertSilkoin_clicked() {
+    double NaniteQty = ui->txtConvertNaniteQty->text().toDouble();
+    double totalBtc = _bittrexMarketSummary->getLastCurrent(double()) * NaniteQty;
+    double totalUsd = totalBtc * _dBtcPriceCurrent;
+
+    ui->lblConvertNaniteResults->setText("$" + QString::number(totalUsd, 'f', 2) +
+                                           "  /  B" + QString::number(totalBtc, 'f', 8));
+
+}
+void PoolBrowser::on_btnUpdateMarketData_clicked() {
+    pollAPIs();
+}
+
+void PoolBrowser::on_lblBittrexMarketLink_linkActivated(const QString &link) {
+    QDesktopServices::openUrl(QUrl(link));
+}
+
+void PoolBrowser::on_lblPoloniexMarketLink_linkActivated(const QString &link) {
+    QDesktopServices::openUrl(QUrl(link));
+}
+void PoolBrowser::on_lblCryptsyMarketLink_linkActivated(const QString &link) {
+    QDesktopServices::openUrl(QUrl(link));
+}
+
+void PoolBrowser::pollAPIs() {
+    ui->iconOverviewUpdateWait->setVisible(true);
+
+    getRequest(apiCoinbasePrice);
+
+    getRequest(apiBittrexMarketSummary);
+    getRequest(apiBittrexTrades);
+    getRequest(apiBittrexOrders);
+
+    getRequest(apiPoloniexMarketSummary);
+    getRequest(apiPoloniex24hVolume);
+    getRequest(apiPoloniexTrades);
+    getRequest(apiPoloniexOrders);
+
+    getRequest(apiCryptsyTrades);
+    getRequest(apiCryptsyOrders);
+}
+
+void PoolBrowser::processOverview() {
+    double averageBittrexCurrent = _bittrexMarketSummary->getLastCurrent(double()) > 0 ? _bittrexMarketSummary->getLastCurrent(double()) : 0.00000001;
+    double averagePoloniexCurrent = _poloniexMarketSummary->getLastCurrent(double()) > 0 ? _poloniexMarketSummary->getLastCurrent(double()) : 0.00000001;
+    double averageCryptsyCurrent = _cryptsyTrades->getLastCurrent(double()) > 0 ? _cryptsyTrades->getLastCurrent(double()) : 0.00000001;
+    double averageAllCurrent = (averageBittrexCurrent + averageCryptsyCurrent + averagePoloniexCurrent) / 3;
+
+    double averageBittrexLast = _bittrexMarketSummary->getLastPrev(double()) > 0 ? _bittrexMarketSummary->getLastPrev(double()) : 0.00000001;
+    double averagePoloniexLast = _poloniexMarketSummary->getLastPrev(double()) > 0 ? _poloniexMarketSummary->getLastPrev(double()) : 0.00000001;
+    double averageCryptsyLast = _cryptsyTrades->getLastPrev(double()) > 0 ? _cryptsyTrades->getLastPrev(double()) : 0.00000001;
+
+    double averageAllLast = (averageBittrexLast + averageCryptsyLast + averagePoloniexLast) / 3;
+
+    updateLabel(ui->lblOverviewScAvgPrice,
+                averageAllCurrent,
+                averageAllLast,
+                QString("B"),
+                8);
+
+    updateLabel(ui->lblOverviewBittrexBtc,
+                _bittrexMarketSummary->getLastCurrent(double()),
+                _bittrexMarketSummary->getLastPrev(double()),
+                QString("B"),
+                8);
+
+    updateLabel(ui->lblOverviewBittrexPerc,
+                (_bittrexMarketSummary->getLastCurrent(double()) - averageAllCurrent) / averageAllCurrent * 100,
+                0,
+                QString(""),
+                QString("%"),
+                2);
+
+    updateLabel(ui->lblOverviewPoloniexBtc,
+                _poloniexMarketSummary->getLastCurrent(double()),
+                _poloniexMarketSummary->getLastPrev(double()),
+                QString("B"),
+                8);
+
+    updateLabel(ui->lblOverviewPoloniexPerc,
+                (_poloniexMarketSummary->getLastCurrent(double()) - averageAllCurrent) / averageAllCurrent * 100,
+                0,
+                QString(""),
+                QString("%"),
+                2);
+
+    updateLabel(ui->lblOverviewCryptsyBtc,
+                _cryptsyTrades->getLastCurrent(double()),
+                _cryptsyTrades->getLastPrev(double()),
+                QString("B"),
+                8);
+
+    updateLabel(ui->lblOverviewCryptsyPerc,
+                (_cryptsyTrades->getLastCurrent(double()) - averageAllCurrent) / averageAllCurrent * 100,
+                0,
+                QString(""),
+                QString("%"),
+                2);
+}
+
+void PoolBrowser::getRequest(const QString &urlString) {
+    QUrl url(urlString);
+    QNetworkRequest req(url);
+    req.setHeader(QNetworkRequest::ContentTypeHeader, "application/json; charset=utf-8");
+    m_nam.get(req);
+}
+
+void PoolBrowser::parseNetworkResponse(QNetworkReply* response) {
+    QUrl apiCall = response->url();
+
+    if (response->error() != QNetworkReply::NoError) {
+        //Communication error has occurred
+        emit networkError(response->error());
+        return;
+    }
+
+    if (apiCall == apiCoinbasePrice) {
+        coinbasePrice(response);
+    } else if (apiCall == apiBittrexMarketSummary) {
+        bittrexMarketSummary(response);
+    } else if (apiCall == apiBittrexTrades) {
+        bittrexTrades(response);
+    } else if (apiCall == apiBittrexOrders) {
+        bittrexOrders(response);
+    } else if (apiCall == apiPoloniexMarketSummary) {
+        poloniexMarketSummary(response);
+    } else if (apiCall == apiPoloniex24hVolume) {
+        poloniex24hVolume(response);
+    } else if (apiCall == apiPoloniexTrades) {
+        poloniexTrades(response);
+    } else if (apiCall == apiPoloniexOrders) {
+        poloniexOrders(response);
+    }  else if (apiCall == apiCryptsyTrades) {
+        cryptsyTrades(response);
+    } else if (apiCall == apiCryptsyOrders) {
+        cryptsyOrders(response);
+    } else { } //Should NEVER get here unless something went completely awry
+
+    if (_bittrexMarketSummary->getLastPrev(double()) > 0 &&
+            _cryptsyTrades->getLastCurrent(double()) > 0 &&
+            _poloniexMarketSummary->getLastCurrent(double()) > 0) {
+        ui->iconOverviewUpdateWait->setVisible(false);
+    }
+
+    processOverview();
+
+    response->deleteLater();
+}
+
+void PoolBrowser::coinbasePrice(QNetworkReply* response) {
+    try {
+        mValue jsonResponse = new mValue();
+        QString apiResponse = response->readAll();
+
+        //Make sure the response is valid
+        if (!read_string(apiResponse.toStdString(), jsonResponse)) {
+            return;
+        }
+
+        mObject jsonObject = jsonResponse.get_obj();
+
+        _dBtcPriceCurrent =  QString::fromStdString(getPairValue(jsonObject, "btc_to_usd").get_str()).toDouble();
+
+        updateLabel(ui->lblOverviewBtcUsdPrice,
+                    _dBtcPriceCurrent,
+                    _dBtcPriceLast,
+                    QString('$'),
+                    2);
+
+        _dBtcPriceLast = _dBtcPriceCurrent;
+        _dScPriceLast = _dBtcPriceCurrent * _bittrexMarketSummary->getLastCurrent(double());
+    } catch (exception ex) {
+        printf("PoolBrowser::coinbasePrice: %s\r\n", ex.what());
+    }
+}
+
+void PoolBrowser::bittrexMarketSummary(QNetworkReply* response) {
+    try {
+        QString apiResponse = response->readAll();
+
+        apiResponse = apiResponse.replace("{\"success\":true,\"message\":\"\",\"result\":[", "").replace("]}", "").replace("},{", "}{");
+
+        QStringList qslApiResponse = apiResponse.split("{", QString::SkipEmptyParts);
+
+        for (int i = 0; i < qslApiResponse.count(); i++) {
+            mValue jsonResponse = new mValue();
+
+            //Fix missing leading brace caused by split string, otherwise it will not be recognized an an mObject
+            qslApiResponse[i].replace("\"MarketName", "{\"MarketName");
+
+            //json_spirit does not handle null so make it "null"
+            qslApiResponse[i].replace("null", "\"null\"");
+
+            //Make sure the response is valid
+            if (read_string(qslApiResponse[i].toStdString(), jsonResponse)) {
+                mObject jsonObject = jsonResponse.get_obj();
+
+                if (getPairValue(jsonObject, "MarketName").get_str() == "BTC-SC") {
+                    try {
+                        _bittrexMarketSummary->setHighCurrent(getPairValue(jsonObject, "High").get_real());
+                        _bittrexMarketSummary->setLowCurrent(getPairValue(jsonObject, "Low").get_real());
+                        _bittrexMarketSummary->setVolumeCurrent(getPairValue(jsonObject, "Volume").get_real());
+                        _bittrexMarketSummary->setLastCurrent(getPairValue(jsonObject, "Last").get_real());
+                        _bittrexMarketSummary->setBaseVolumeCurrent(getPairValue(jsonObject, "BaseVolume").get_real());
+                        _bittrexMarketSummary->setTimeStamp(getPairValue(jsonObject, "TimeStamp").get_str());
+                        _bittrexMarketSummary->setBidCurrent(getPairValue(jsonObject, "Bid").get_real());
+                        _bittrexMarketSummary->setAskCurrent(getPairValue(jsonObject, "Ask").get_real());
+                        _bittrexMarketSummary->setPrevDayCurrent(getPairValue(jsonObject, "PrevDay").get_real());
+                    } catch (exception ex) {
+                        printf("PoolBrowser::bittrexMarketSummary: %s\r\n", ex.what()); //API did not return all needed data so skip processing market summary
+                    }
+
+                    break;
+                }
+            }
+        }
+
+        updateLabel(ui->lblBittrexHighBtc,
+                    _bittrexMarketSummary->getHighCurrent(double()),
+                    _bittrexMarketSummary->getHighPrev(double()),
+                    QString("B"),
+                    8);
+
+        updateLabel(ui->lblBittrexLowBtc,
+                    _bittrexMarketSummary->getLowCurrent(double()),
+                    _bittrexMarketSummary->getLowPrev(double()),
+                    QString("B"),
+                    8);
+
+        updateLabel(ui->lblBittrexCloseBtc,
+                    _bittrexMarketSummary->getPrevDayCurrent(double()),
+                    _bittrexMarketSummary->getPrevDayPrev(double()),
+                    QString("B"),
+                    8);
+
+        double changeCurrent = (_bittrexMarketSummary->getLastCurrent(double()) - _bittrexMarketSummary->getPrevDayCurrent(double())) / _bittrexMarketSummary->getPrevDayCurrent(double()) * 100;
+        double changeLast  = (_bittrexMarketSummary->getLastPrev(double()) - _bittrexMarketSummary->getPrevDayCurrent(double())) / _bittrexMarketSummary->getPrevDayCurrent(double()) * 100;
+
+        QString changeDirection = _bittrexMarketSummary->getLastCurrent(double()) > _bittrexMarketSummary->getPrevDayCurrent(double())
+                                  ? QString("+") : _bittrexMarketSummary->getLastCurrent(double()) < _bittrexMarketSummary->getPrevDayCurrent(double())
+                                  ? QString("") : QString("");
+
+        updateLabel(ui->lblBittrexChangePerc,
+                    changeCurrent,
+                    changeLast,
+                    changeDirection,
+                    QString("%"),
+                    2);
+
+        updateLabel(ui->lblBittrexVolumeUsd,
+                    _bittrexMarketSummary->getBaseVolumeCurrent(double()) * _dBtcPriceCurrent,
+                    _bittrexMarketSummary->getBaseVolumePrev(double()) * _dBtcPriceCurrent,
+                    QString(""),
+                    2);
+
+        updateLabel(ui->lblBittrexVolumeSc,
+                    _bittrexMarketSummary->getVolumeCurrent(double()),
+                    _bittrexMarketSummary->getVolumePrev(double()),
+                    QString(""),
+                    4);
+
+        updateLabel(ui->lblBittrexVolumeBtc,
+                    _bittrexMarketSummary->getBaseVolumeCurrent(double()),
+                    _bittrexMarketSummary->getBaseVolumePrev(double()),
+                    QString(""),
+                    4);
+
+        updateLabel(ui->lblBittrexLastBtc,
+                    _bittrexMarketSummary->getLastCurrent(double()),
+                    _bittrexMarketSummary->getLastPrev(double()),
+                    QString("B"),
+                    8);
+
+        updateLabel(ui->lblBittrexLastUsd,
+                    _bittrexMarketSummary->getLastCurrent(double()) * _dBtcPriceCurrent,
+                    _bittrexMarketSummary->getLastPrev(double()) * _dBtcPriceCurrent,
+                    QString("$"),
+                    8);
+
+        updateLabel(ui->lblBittrexAskBtc,
+                    _bittrexMarketSummary->getAskCurrent(double()),
+                    _bittrexMarketSummary->getAskPrev(double()),
+                    QString("B"),
+                    8);
+
+        updateLabel(ui->lblBittrexAskUsd,
+                    _bittrexMarketSummary->getAskCurrent(double()) * _dBtcPriceCurrent,
+                    _bittrexMarketSummary->getAskPrev(double()) * _dBtcPriceCurrent,
+                    QString("$"),
+                    8);
+
+        updateLabel(ui->lblBittrexBidBtc,
+                    _bittrexMarketSummary->getBidCurrent(double()),
+                    _bittrexMarketSummary->getBidPrev(double()),
+                    QString("B"),
+                    8);
+
+        updateLabel(ui->lblBittrexBidUsd,
+                    _bittrexMarketSummary->getBidCurrent(double()) * _dBtcPriceCurrent,
+                    _bittrexMarketSummary->getBidPrev(double()) * _dBtcPriceCurrent,
+                    QString("$"),
+                    8);
+
+        _bittrexMarketSummary->setAskPrev(_bittrexMarketSummary->getAskCurrent(double()));
+        _bittrexMarketSummary->setBaseVolumePrev(_bittrexMarketSummary->getBaseVolumeCurrent(double()));
+        _bittrexMarketSummary->setBidPrev(_bittrexMarketSummary->getBidCurrent(double()));
+        _bittrexMarketSummary->setHighPrev(_bittrexMarketSummary->getHighCurrent(double()));
+        _bittrexMarketSummary->setLowPrev(_bittrexMarketSummary->getLowCurrent(double()));
+        _bittrexMarketSummary->setPrevDayPrev(_bittrexMarketSummary->getPrevDayCurrent(double()));
+        _bittrexMarketSummary->setLastPrev(_bittrexMarketSummary->getLastCurrent(double()));
+        _bittrexMarketSummary->setVolumePrev(_bittrexMarketSummary->getVolumeCurrent(double()));
+
+        _dScPriceLast = _dBtcPriceCurrent * _bittrexMarketSummary->getLastCurrent(double());
+    } catch (exception ex) {
+        printf("PoolBrowser::bittrexMarketSummary: %s\r\n", ex.what());
+    }
+}
+void PoolBrowser::bittrexTrades(QNetworkReply* response) {
+    try {
+        int z = 0;
+        double high = 0;
+        double low = 100000;
+
+        ui->tblBittrexTrades->clear();
+        ui->tblBittrexTrades->setColumnWidth(0, 60);
+        ui->tblBittrexTrades->setColumnWidth(1, 110);
+        ui->tblBittrexTrades->setColumnWidth(2, 110);
+        ui->tblBittrexTrades->setColumnWidth(3, 100);
+        ui->tblBittrexTrades->setColumnWidth(4, 160);
+        ui->tblBittrexTrades->setSortingEnabled(false);
+
+        QString apiResponse = response->readAll();
+
+        apiResponse = apiResponse.replace("{\"success\":true,\"message\":\"\",\"result\":[", "").replace("]}", "").replace("},{", "}{");
+
+        QStringList qslApiResponse = apiResponse.split("{", QString::SkipEmptyParts);
+
+        int tradeCount = qslApiResponse.count();
+        QVector<double> xAxis(tradeCount), yAxis(tradeCount);
+
+        for (int i = 0; i < tradeCount; i++) {
+            mValue jsonResponse = new mValue();
+
+            //Fix missing leading brace caused by split string, otherwise it will not be recognized an an mObject
+            qslApiResponse[i].replace("\"Id", "{\"Id");
+
+            //json_spirit does not handle null so make it "null"
+            qslApiResponse[i].replace("null", "\"null\"");
+
+            //Make sure the response is valid
+            if (read_string(qslApiResponse[i].toStdString(), jsonResponse)) {
+                mObject jsonObject = jsonResponse.get_obj();
+
+                try {
+                    _bittrexTrades->setId(getPairValue(jsonObject, "Id").get_real());
+                    _bittrexTrades->setTimeStamp(getPairValue(jsonObject, "TimeStamp").get_str());
+                    _bittrexTrades->setQuantity(getPairValue(jsonObject, "Quantity").get_real());
+                    _bittrexTrades->setPrice(getPairValue(jsonObject, "Price").get_real());
+                    _bittrexTrades->setTotal(getPairValue(jsonObject, "Total").get_real());
+                    _bittrexTrades->setFillType(getPairValue(jsonObject, "FillType").get_str());
+                    _bittrexTrades->setOrderType(getPairValue(jsonObject, "OrderType").get_str());
+                } catch (exception ex) {
+                    printf("PoolBrowser::bittrexTrades: %s\r\n", ex.what()); //API did not return all needed data so skip this trade
+                }
+
+                QTreeWidgetItem * qtTrades = new QTreeWidgetItem();
+
+                qtTrades->setText(0, _bittrexTrades->getOrderType());
+                qtTrades->setText(1, _bittrexTrades->getPrice(QString()));
+                qtTrades->setText(2, _bittrexTrades->getQuantity(QString()));
+                qtTrades->setText(3, _bittrexTrades->getTotal(QString()));
+                qtTrades->setText(4, _bittrexTrades->getTimeStamp());
+
+                ui->tblBittrexTrades->addTopLevelItem(qtTrades);
+
+                xAxis[z] = tradeCount - z;
+                yAxis[z] = _bittrexTrades->getPrice(double()) * 100000000;
+
+                high = _bittrexTrades->getPrice(double()) > high ? _bittrexTrades->getPrice(double()) : high;
+                low = _bittrexTrades->getPrice(double()) < low ? _bittrexTrades->getPrice(double()) : low;
+
+                z++;
+            }
+        }
+
+        high *=  100000000;
+        low *=  100000000;
+
+        ui->qCustomPlotBittrexTrades->graph(0)->setData(xAxis, yAxis);
+        ui->qCustomPlotBittrexTrades->graph(0)->setPen(QPen(QColor(34, 177, 76)));
+        ui->qCustomPlotBittrexTrades->graph(0)->setBrush(QBrush(QColor(34, 177, 76, 20)));
+
+        ui->qCustomPlotBittrexTrades->xAxis->setRange(1, tradeCount);
+        ui->qCustomPlotBittrexTrades->yAxis->setRange(low, high);
+
+        ui->qCustomPlotBittrexTrades->replot();
+    } catch (exception ex) {
+        printf("PoolBrowser::bittrexTrades: %s\r\n", ex.what());
+    }
+}
+void PoolBrowser::bittrexOrders(QNetworkReply* response) {
+    try {
+        int z = 0;
+        double high = 0;
+        double low = 100000;
+        double sumBuys = 0;
+        double sumSells = 0;
+        double sumHighest = 0;
+
+        ui->qTreeWidgetBittrexBuy->clear();
+        ui->qTreeWidgetBittrexBuy->sortByColumn(0, Qt::DescendingOrder);
+        ui->qTreeWidgetBittrexBuy->setSortingEnabled(true);
+
+        ui->qTreeWidgetBittrexSell->clear();
+        ui->qTreeWidgetBittrexSell->sortByColumn(0, Qt::AscendingOrder);
+        ui->qTreeWidgetBittrexSell->setSortingEnabled(true);
+
+        QString apiResponse = response->readAll();
+
+        apiResponse = apiResponse.replace("{\"success\":true,\"message\":\"\",\"result\":{\"buy\":[", "");
+        QStringList qslApiResponse = apiResponse.split("],\"sell\":[");
+
+        QStringList qslApiResponseBuys = qslApiResponse[0].replace("},{", "}{").split("{", QString::SkipEmptyParts);
+        QStringList qslApiResponseSells = qslApiResponse[1].replace("]}}", "").replace("},{", "}{").split("{", QString::SkipEmptyParts);
+
+        //Use shorest depth as limit and use buy length if they are the same
+        int depth = qslApiResponseBuys.length() > qslApiResponseSells.length()
+                    ? qslApiResponseSells.length() : qslApiResponseSells.length() > qslApiResponseBuys.length()
+                    ? qslApiResponseBuys.length() : qslApiResponseBuys.length();
+
+        //Prevent overflow by limiting depth to 50
+        //Also check for odd number of orders and drop the last one
+        //To avoid an overflow when there are less than 50 orders
+        depth = depth > 50
+                ? 50 : depth % 2 == 1
+                ? depth - 1 : depth;
+
+        QVector<double> xAxisBuys(depth), yAxisBuys(depth);
+        QVector<double> xAxisSells(depth), yAxisSells(depth);
+
+        for (int i = 0; i < depth; i++) {
+            mValue jsonResponse = new mValue();
+
+            //Fix missing leading brace caused by split string, otherwise it will not be recognized an an mObject
+            qslApiResponseBuys[i].replace("\"Quantity", "{\"Quantity");
+            qslApiResponseSells[i].replace("\"Quantity", "{\"Quantity");
+
+            //json_spirit does not handle null so make it "null"
+            qslApiResponseBuys[i].replace("null", "\"null\"");
+            qslApiResponseSells[i].replace("null", "\"null\"");
+
+            //Make sure the response is valid
+            if (read_string(qslApiResponseBuys[i].toStdString(), jsonResponse)) {
+                mObject jsonObjectBuys = jsonResponse.get_obj();
+
+                try {
+                    _bittrexOrders->setQuantity(getPairValue(jsonObjectBuys, "Quantity").get_real());
+                    _bittrexOrders->setPrice(getPairValue(jsonObjectBuys, "Rate").get_real());
+                    _bittrexOrders->setOrderType("Buy");
+                } catch (exception ex) {
+                    printf("PoolBrowser::bittrexOrders: %s\r\n", ex.what()); //API did not return all needed data so skip this order
+                }
+
+                QTreeWidgetItem * qtBuys = new QTreeWidgetItem();
+
+                qtBuys->setText(0, _bittrexOrders->getPrice(QString()));
+                qtBuys->setText(1, _bittrexOrders->getQuantity(QString()));
+
+                ui->qTreeWidgetBittrexBuy->addTopLevelItem(qtBuys);
+
+                sumBuys += _bittrexOrders->getQuantity(double());
+                xAxisBuys[z] = _bittrexOrders->getPrice(double()) * 100000000;
+                yAxisBuys[z] = sumBuys;
+            }
+
+            high = _bittrexOrders->getPrice(double()) > high ? _bittrexOrders->getPrice(double()) : high;
+            low = _bittrexOrders->getPrice(double()) < low ? _bittrexOrders->getPrice(double()) : low;
+
+            //Make sure the response is valid
+            if (read_string(qslApiResponseSells[i].toStdString(), jsonResponse)) {
+                mObject jsonObjectSells = jsonResponse.get_obj();
+
+                try {
+                    _bittrexOrders->setQuantity(getPairValue(jsonObjectSells, "Quantity").get_real());
+                    _bittrexOrders->setPrice(getPairValue(jsonObjectSells, "Rate").get_real());
+                    _bittrexOrders->setOrderType("Sell");
+                } catch (exception ex) {
+                    printf("PoolBrowser::bittrexOrders: %s\r\n", ex.what()); //API did not return all needed data so skip this order
+                }
+
+                QTreeWidgetItem * qtSells = new QTreeWidgetItem();
+
+                qtSells->setText(0, _bittrexOrders->getPrice(QString()));
+                qtSells->setText(1, _bittrexOrders->getQuantity(QString()));
+
+                ui->qTreeWidgetBittrexSell->addTopLevelItem(qtSells);
+
+                sumSells += _bittrexOrders->getQuantity(double());
+                xAxisSells[z] = _bittrexOrders->getPrice(double()) * 100000000;
+                yAxisSells[z] = sumSells;
+            }
+
+            high = _bittrexOrders->getPrice(double()) > high ? _bittrexOrders->getPrice(double()) : high;
+            low = _bittrexOrders->getPrice(double()) < low ? _bittrexOrders->getPrice(double()) : low;
+
+            z++;
+        }
+
+        high *=  100000000;
+        low *=  100000000;
+
+        sumHighest = sumBuys > sumSells ? sumBuys : sumBuys < sumSells ? sumSells : sumBuys;
+
+        ui->qCustomPlotBittrexOrderDepth->graph(0)->setData(xAxisBuys, yAxisBuys);
+        ui->qCustomPlotBittrexOrderDepth->graph(1)->setData(xAxisSells, yAxisSells);
+
+        ui->qCustomPlotBittrexOrderDepth->graph(0)->setPen(QPen(QColor(34, 177, 76)));
+        ui->qCustomPlotBittrexOrderDepth->graph(0)->setBrush(QBrush(QColor(34, 177, 76, 20)));
+        ui->qCustomPlotBittrexOrderDepth->graph(1)->setPen(QPen(QColor(237, 24, 35)));
+        ui->qCustomPlotBittrexOrderDepth->graph(1)->setBrush(QBrush(QColor(237, 24, 35, 20)));
+
+        ui->qCustomPlotBittrexOrderDepth->xAxis->setRange(low, high);
+        ui->qCustomPlotBittrexOrderDepth->yAxis->setRange(low, sumHighest);
+
+        ui->qCustomPlotBittrexOrderDepth->replot();
+    } catch (exception ex) {
+        printf("PoolBrowser::bittrexOrders: %s\r\n", ex.what());
+    }
+}
+
+void PoolBrowser::poloniexMarketSummary(QNetworkReply* response) {
+    try {
+        QJsonParseError *error = new QJsonParseError();
+        QJsonDocument apiResponse = QJsonDocument::fromJson(response->readAll(), error);
+        QJsonObject jsonObject = apiResponse.object();
+
+        QJsonObject scMarket = jsonObject["BTC_SC"].toObject();
+
+        _poloniexMarketSummary->setLastCurrent(scMarket["last"].toString());
+        _poloniexMarketSummary->setAskCurrent(scMarket["lowestAsk"].toString());
+        _poloniexMarketSummary->setBidCurrent(scMarket["highestBid"].toString());
+        _poloniexMarketSummary->setPercentChangeCurrent(scMarket["percentChange"].toString());
+
+        updateLabel(ui->lblPoloniexChangePerc,
+                    _poloniexMarketSummary->getPercentChangeCurrent(double() * 100),
+                    _poloniexMarketSummary->getPercentChangePrev(double() * 100),
+                    QString(""),
+                    QString("%"),
+                    2);
+
+        updateLabel(ui->lblPoloniexLastBtc,
+                    _poloniexMarketSummary->getLastCurrent(double()),
+                    _poloniexMarketSummary->getLastPrev(double()),
+                    QString("B"),
+                    8);
+
+        updateLabel(ui->lblPoloniexLastUsd,
+                    _poloniexMarketSummary->getLastCurrent(double()) * _dBtcPriceCurrent,
+                    _poloniexMarketSummary->getLastPrev(double()) * _dBtcPriceCurrent,
+                    QString("$"),
+                    8);
+
+        updateLabel(ui->lblPoloniexAskBtc,
+                    _poloniexMarketSummary->getAskCurrent(double()),
+                    _poloniexMarketSummary->getAskPrev(double()),
+                    QString("B"),
+                    8);
+
+        updateLabel(ui->lblPoloniexAskUsd,
+                    _poloniexMarketSummary->getAskCurrent(double()) * _dBtcPriceCurrent,
+                    _poloniexMarketSummary->getAskPrev(double()) * _dBtcPriceCurrent,
+                    QString("$"),
+                    8);
+
+        updateLabel(ui->lblPoloniexBidBtc,
+                    _poloniexMarketSummary->getBidCurrent(double()),
+                    _poloniexMarketSummary->getBidPrev(double()),
+                    QString("B"),
+                    8);
+
+        updateLabel(ui->lblPoloniexBidUsd,
+                    _poloniexMarketSummary->getBidCurrent(double()) * _dBtcPriceCurrent,
+                    _poloniexMarketSummary->getBidPrev(double()) * _dBtcPriceCurrent,
+                    QString("$"),
+                    8);
+
+        _poloniexMarketSummary->setAskPrev(_poloniexMarketSummary->getAskCurrent(double()));
+        _poloniexMarketSummary->setBidPrev(_poloniexMarketSummary->getBidCurrent(double()));
+        _poloniexMarketSummary->setLastPrev(_poloniexMarketSummary->getLastCurrent(double()));
+
+        _dScPriceLast = _dBtcPriceCurrent * _poloniexMarketSummary->getLastCurrent(double());
+    } catch (exception ex) {
+        printf("PoolBrowser::poloniexMarketSummary: %s\r\n", ex.what());
+    }
+}
+void PoolBrowser::poloniex24hVolume(QNetworkReply* response) {
+    try {
+        QJsonParseError *error = new QJsonParseError();
+        QJsonDocument apiResponse = QJsonDocument::fromJson(response->readAll(), error);
+        QJsonArray jsonArray = apiResponse.array();
+
+        QJsonObject scMarket = jsonArray[0].toObject();
+
+        _poloninex24hVolume->setHighCurrent(scMarket["high"].toDouble());
+        _poloninex24hVolume->setLowCurrent(scMarket["low"].toDouble());
+        _poloninex24hVolume->setPrevDayCurrent(scMarket["close"].toDouble());
+        _poloninex24hVolume->setBaseVolumeCurrent(scMarket["volume"].toDouble());
+        _poloninex24hVolume->setVolumeCurrent(scMarket["quoteVolume"].toDouble());
+
+        updateLabel(ui->lblPoloniexHighBtc,
+                    _poloninex24hVolume->getHighCurrent(double()),
+                    _poloninex24hVolume->getHighPrev(double()),
+                    QString("B"),
+                    8);
+
+        updateLabel(ui->lblPoloniexLowBtc,
+                    _poloninex24hVolume->getLowCurrent(double()),
+                    _poloninex24hVolume->getLowPrev(double()),
+                    QString("B"),
+                    8);
+
+        updateLabel(ui->lblPoloniexCloseBtc,
+                    _poloninex24hVolume->getPrevDayCurrent(double()),
+                    _poloninex24hVolume->getPrevDayPrev(double()),
+                    QString("B"),
+                    8);
+
+        updateLabel(ui->lblPoloniexVolumeUsd,
+                    _poloninex24hVolume->getBaseVolumeCurrent(double()) * _dBtcPriceCurrent,
+                    _poloninex24hVolume->getBaseVolumePrev(double()) * _dBtcPriceCurrent,
+                    QString(""),
+                    2);
+
+        updateLabel(ui->lblPoloniexVolumeSc,
+                    _poloninex24hVolume->getVolumeCurrent(double()),
+                    _poloninex24hVolume->getVolumePrev(double()),
+                    QString(""),
+                    4);
+
+        updateLabel(ui->lblPoloniexVolumeBtc,
+                    _poloninex24hVolume->getBaseVolumeCurrent(double()),
+                    _poloninex24hVolume->getBaseVolumePrev(double()),
+                    QString(""),
+                    4);
+
+        _poloninex24hVolume->setHighPrev(_poloninex24hVolume->getHighCurrent(double()));
+        _poloninex24hVolume->setLowPrev(_poloninex24hVolume->getLowCurrent(double()));
+        _poloninex24hVolume->setPrevDayPrev(_poloninex24hVolume->getPrevDayCurrent(double()));
+        _poloninex24hVolume->setBaseVolumePrev(_poloninex24hVolume->getBaseVolumeCurrent(double()));
+        _poloninex24hVolume->setVolumePrev(_poloninex24hVolume->getVolumeCurrent(double()));
+    } catch (exception ex) {
+        printf("PoolBrowser::poloniex24hVolume: %s\r\n", ex.what());
+    }
+}
+void PoolBrowser::poloniexTrades(QNetworkReply* response) {
+    try {
+        int z = 0;
+        double high = 0;
+        double low = 100000;
+
+        ui->tblPoloniexTrades->clear();
+        ui->tblPoloniexTrades->setColumnWidth(0, 60);
+        ui->tblPoloniexTrades->setColumnWidth(1, 110);
+        ui->tblPoloniexTrades->setColumnWidth(2, 110);
+        ui->tblPoloniexTrades->setColumnWidth(3, 100);
+        ui->tblPoloniexTrades->setColumnWidth(4, 160);
+        ui->tblPoloniexTrades->setSortingEnabled(false);
+
+        QJsonParseError *error = new QJsonParseError();
+        QJsonDocument apiResponse = QJsonDocument::fromJson(response->readAll(), error);
+        QJsonArray jsonArray = apiResponse.array();
+
+        int tradeCount = jsonArray.size();
+        QVector<double> xAxis(tradeCount), yAxis(tradeCount);
+
+        for (int i = 0; i < tradeCount; i++) {
+            try {
+                QJsonObject trade = jsonArray[i].toObject();
+
+                _poloniexTrades->setId(trade["tradeID"].toString());
+                _poloniexTrades->setTimeStamp(trade["date"].toString());
+                _poloniexTrades->setOrderType(trade["type"].toString().toStdString());
+                _poloniexTrades->setPrice(trade["rate"].toString());
+                _poloniexTrades->setQuantity(trade["amount"].toString());
+                _poloniexTrades->setTotal(trade["total"].toString());
+
+            } catch (exception) {} //API did not return all needed data so skip this trade
+
+            QTreeWidgetItem * qtTrades = new QTreeWidgetItem();
+
+            qtTrades->setText(0, _poloniexTrades->getOrderType());
+            qtTrades->setText(1, _poloniexTrades->getPrice(QString()));
+            qtTrades->setText(2, _poloniexTrades->getQuantity(QString()));
+            qtTrades->setText(3, _poloniexTrades->getTotal(QString()));
+            qtTrades->setText(4, _poloniexTrades->getTimeStamp());
+
+            ui->tblPoloniexTrades->addTopLevelItem(qtTrades);
+
+            xAxis[z] = tradeCount - z;
+            yAxis[z] = _poloniexTrades->getPrice(double()) * 100000000;
+
+            high = _poloniexTrades->getPrice(double()) > high ? _poloniexTrades->getPrice(double()) : high;
+            low = _poloniexTrades->getPrice(double()) < low ? _poloniexTrades->getPrice(double()) : low;
+
+            z++;
+        }
+
+        high *=  100000000;
+        low *=  100000000;
+
+        ui->qCustomPlotPoloniexTrades->graph(0)->setData(xAxis, yAxis);
+        ui->qCustomPlotPoloniexTrades->graph(0)->setPen(QPen(QColor(34, 177, 76)));
+        ui->qCustomPlotPoloniexTrades->graph(0)->setBrush(QBrush(QColor(34, 177, 76, 20)));
+
+        ui->qCustomPlotPoloniexTrades->xAxis->setRange(1, tradeCount);
+        ui->qCustomPlotPoloniexTrades->yAxis->setRange(low, high);
+
+        ui->qCustomPlotPoloniexTrades->replot();
+    } catch (exception ex) {
+        printf("PoolBrowser::poloniexTrades: %s\r\n", ex.what());
+    }
+}
+void PoolBrowser::poloniexOrders(QNetworkReply* response) {
+    try {
+        int z = 0;
+        double high = 0;
+        double low = 100000;
+        double sumBuys = 0;
+        double sumSells = 0;
+        double sumHighest = 0;
+
+        ui->qTreeWidgetPoloniexBuy->clear();
+        ui->qTreeWidgetPoloniexBuy->sortByColumn(0, Qt::DescendingOrder);
+        ui->qTreeWidgetPoloniexBuy->setSortingEnabled(true);
+
+        ui->qTreeWidgetPoloniexSell->clear();
+        ui->qTreeWidgetPoloniexSell->sortByColumn(0, Qt::AscendingOrder);
+        ui->qTreeWidgetPoloniexSell->setSortingEnabled(true);
+
+        QJsonParseError *error = new QJsonParseError();
+        QJsonDocument apiResponse = QJsonDocument::fromJson(response->readAll(), error);
+        QJsonObject jsonObject = apiResponse.object();
+        QJsonArray jsonValueAsks = jsonObject["asks"].toArray();
+        QJsonArray jsonValueBids = jsonObject["bids"].toArray();
+
+        //Use shorest depth as limit and use bid size if they are the same
+        int depth = jsonValueBids.size() > jsonValueAsks.size()
+                    ? jsonValueAsks.size() : jsonValueAsks.size() > jsonValueBids.size()
+                    ? jsonValueBids.size() : jsonValueBids.size();
+
+        //Prevent overflow by limiting depth to 50
+        //Also check for odd number of orders and drop the last one
+        //To avoid an overflow when there are less than 50 orders
+        depth = depth > 50
+                ? 50 : depth % 2 == 1
+                ? depth - 1 : depth;
+
+        QVector<double> xAxisBuys(depth), yAxisBuys(depth);
+        QVector<double> xAxisSells(depth), yAxisSells(depth);
+
+        for (int i = 0; i < depth; i++) {
+            QJsonArray asks = jsonValueAsks[i].toArray();
+
+            _poloniexOrders->setPrice(asks[0].toString());
+            _poloniexOrders->setQuantity(asks[1].toDouble());
+            _poloniexOrders->setOrderType("Sell");
+
+            QTreeWidgetItem * qtSells = new QTreeWidgetItem();
+
+            qtSells->setText(0, _poloniexOrders->getPrice(QString()));
+            qtSells->setText(1, _poloniexOrders->getQuantity(QString()));
+
+            ui->qTreeWidgetPoloniexSell->addTopLevelItem(qtSells);
+
+            sumSells += _poloniexOrders->getQuantity(double());
+            xAxisSells[z] = _poloniexOrders->getPrice(double()) * 100000000;
+            yAxisSells[z] = sumSells;
+
+            high = _poloniexOrders->getPrice(double()) > high ? _poloniexOrders->getPrice(double()) : high;
+            low = _poloniexOrders->getPrice(double()) < low ? _poloniexOrders->getPrice(double()) : low;
+
+            QJsonArray bids = jsonValueBids[i].toArray();
+
+            _poloniexOrders->setPrice(bids[0].toString());
+            _poloniexOrders->setQuantity(bids[1].toDouble());
+            _poloniexOrders->setOrderType("Buy");
+
+            QTreeWidgetItem * qtBuys = new QTreeWidgetItem();
+
+            qtBuys->setText(0, _poloniexOrders->getPrice(QString()));
+            qtBuys->setText(1, _poloniexOrders->getQuantity(QString()));
+
+            ui->qTreeWidgetPoloniexBuy->addTopLevelItem(qtBuys);
+
+            sumBuys += _poloniexOrders->getQuantity(double());
+            xAxisBuys[z] = _poloniexOrders->getPrice(double()) * 100000000;
+            yAxisBuys[z] = sumBuys;
+
+            high = _poloniexOrders->getPrice(double()) > high ? _poloniexOrders->getPrice(double()) : high;
+            low = _poloniexOrders->getPrice(double()) < low ? _poloniexOrders->getPrice(double()) : low;
+
+            z++;
+        }
+
+        high *=  100000000;
+        low *=  100000000;
+
+        sumHighest = sumBuys > sumSells ? sumBuys : sumBuys < sumSells ? sumSells : sumBuys;
+
+        ui->qCustomPlotPoloniexOrderDepth->graph(0)->setData(xAxisBuys, yAxisBuys);
+        ui->qCustomPlotPoloniexOrderDepth->graph(1)->setData(xAxisSells, yAxisSells);
+
+        ui->qCustomPlotPoloniexOrderDepth->graph(0)->setPen(QPen(QColor(34, 177, 76)));
+        ui->qCustomPlotPoloniexOrderDepth->graph(0)->setBrush(QBrush(QColor(34, 177, 76, 20)));
+        ui->qCustomPlotPoloniexOrderDepth->graph(1)->setPen(QPen(QColor(237, 24, 35)));
+        ui->qCustomPlotPoloniexOrderDepth->graph(1)->setBrush(QBrush(QColor(237, 24, 35, 20)));
+
+        ui->qCustomPlotPoloniexOrderDepth->xAxis->setRange(low, high);
+        ui->qCustomPlotPoloniexOrderDepth->yAxis->setRange(low, sumHighest);
+
+        ui->qCustomPlotPoloniexOrderDepth->replot();
+    } catch (exception ex) {
+        printf("PoolBrowser::poloniexOrders: %s\r\n", ex.what());
+    }
+}
+
+void PoolBrowser::cryptsyTrades(QNetworkReply* response) {
+    try {
+        int z = 0;
+        double high = 0;
+        double low = 100000;
+
+        ui->tblCryptsyTrades->clear();
+        ui->tblCryptsyTrades->setColumnWidth(0, 60);
+        ui->tblCryptsyTrades->setColumnWidth(1, 110);
+        ui->tblCryptsyTrades->setColumnWidth(2, 110);
+        ui->tblCryptsyTrades->setColumnWidth(3, 100);
+        ui->tblCryptsyTrades->setColumnWidth(4, 160);
+        ui->tblCryptsyTrades->setSortingEnabled(false);
+
+        QString apiResponse = response->readAll();
+
+        QStringList qslApiResponse = apiResponse.replace("{\"success\":1,\"return\":{\"markets\":{\"SC\":", "").replace(",\"recenttrades\":", "}").replace("]}}}}", "").replace("},{", "}{").split("[");
+        QString apiResponseMarketSummary = qslApiResponse[0].replace("\\", "");
+        QStringList qslApiResponseTrades = qslApiResponse[1].split("{", QString::SkipEmptyParts);
+
+        mValue jsonResponseMarketSummary = new mValue();
+
+        if (!read_string(apiResponseMarketSummary.toStdString(), jsonResponseMarketSummary)) {
+            return;
+        }
+
+        mObject jsonObjectMarketSummary = jsonResponseMarketSummary.get_obj();
+
+        _cryptsyTrades->setLastCurrent(getPairValue(jsonObjectMarketSummary, "lasttradeprice").get_str());
+        _cryptsyTrades->setVolumeCurrent(getPairValue(jsonObjectMarketSummary, "volume").get_str());
+
+        int tradeCount = qslApiResponseTrades.count();
+
+        //Prevent overflow by limiting trade data to no more than 100
+        tradeCount = tradeCount > 100
+                     ? 100 : tradeCount % 2 == 1
+                     ? tradeCount - 1 : tradeCount;
+
+        QVector<double> xAxis(tradeCount), yAxis(tradeCount);
+
+        for (int i = 0; i < tradeCount; i++) {
+            mValue jsonResponse = new mValue();
+
+            //Fix missing leading brace caused by split string, otherwise it will not be recognized an an mObject
+            qslApiResponseTrades[i].replace("\"id", "{\"id");
+
+            //json_spirit does not handle null so make it "null"
+            qslApiResponseTrades[i].replace("null", "\"null\"");
+
+            //Make sure the response is valid
+            if (read_string(qslApiResponseTrades[i].toStdString(), jsonResponse)) {
+                mObject jsonObject = jsonResponse.get_obj();
+
+                try {
+                    _cryptsyTrades->setId(getPairValue(jsonObject, "id").get_str());
+                    _cryptsyTrades->setTimeStamp(getPairValue(jsonObject, "time").get_str());
+                    _cryptsyTrades->setPrice(getPairValue(jsonObject, "price").get_str());
+                    _cryptsyTrades->setQuantity(getPairValue(jsonObject, "quantity").get_str());
+                    _cryptsyTrades->setTotal(getPairValue(jsonObject, "total").get_str());
+                    _cryptsyTrades->setOrderType(getPairValue(jsonObject, "type").get_str());
+                } catch (exception ex) {
+                    printf("PoolBrowser::cryptsyTrades: %s\r\n", ex.what()); //API did not return all needed data so skip this trade
+                }
+
+                QTreeWidgetItem * qtTrades = new QTreeWidgetItem();
+
+                qtTrades->setText(0, _cryptsyTrades->getOrderType());
+                qtTrades->setText(1, _cryptsyTrades->getPrice(QString()));
+                qtTrades->setText(2, _cryptsyTrades->getQuantity(QString()));
+                qtTrades->setText(3, _cryptsyTrades->getTotal(QString()));
+                qtTrades->setText(4, _cryptsyTrades->getTimeStamp());
+
+                ui->tblCryptsyTrades->addTopLevelItem(qtTrades);
+
+                xAxis[z] = tradeCount - z;
+                yAxis[z] = _cryptsyTrades->getPrice(double()) * 100000000;
+
+                high = _cryptsyTrades->getPrice(double()) > high ? _cryptsyTrades->getPrice(double()) : high;
+                low = _cryptsyTrades->getPrice(double()) < low ? _cryptsyTrades->getPrice(double()) : low;
+
+                z++;
+            }
+        }
+
+        high *=  100000000;
+        low *=  100000000;
+
+        updateLabel(ui->lblCryptsyVolumeSc,
+                    _cryptsyTrades->getVolumeCurrent(double()),
+                    _cryptsyTrades->getVolumePrev(double()),
+                    QString(""),
+                    4);
+
+        updateLabel(ui->lblCryptsyVolumeBtc,
+                    _cryptsyTrades->getVolumeCurrent(double()) * _cryptsyTrades->getLastCurrent(double()),
+                    _cryptsyTrades->getVolumePrev(double()) * _cryptsyTrades->getLastCurrent(double()),
+                    QString(""),
+                    4);
+
+        updateLabel(ui->lblCryptsyVolumeUsd,
+                    _cryptsyTrades->getVolumeCurrent(double()) * _cryptsyTrades->getLastCurrent(double()) * _dBtcPriceCurrent,
+                    _cryptsyTrades->getVolumePrev(double()) * _cryptsyTrades->getLastCurrent(double()) * _dBtcPriceCurrent,
+                    QString(""),
+                    4);
+
+        updateLabel(ui->lblCryptsyLastBtc,
+                    _cryptsyTrades->getLastCurrent(double()),
+                    _cryptsyTrades->getLastPrev(double()),
+                    QString("B"),
+                    8);
+
+        updateLabel(ui->lblCryptsyLastUsd,
+                    _cryptsyTrades->getLastCurrent(double()) * _dBtcPriceCurrent,
+                    _cryptsyTrades->getLastPrev(double()) * _dBtcPriceCurrent,
+                    QString("$"),
+                    8);
+
+        ui->qCustomPlotCryptsyTrades->graph(0)->setData(xAxis, yAxis);
+        ui->qCustomPlotCryptsyTrades->graph(0)->setPen(QPen(QColor(34, 177, 76)));
+        ui->qCustomPlotCryptsyTrades->graph(0)->setBrush(QBrush(QColor(34, 177, 76, 20)));
+
+        ui->qCustomPlotCryptsyTrades->xAxis->setRange(1, tradeCount);
+        ui->qCustomPlotCryptsyTrades->yAxis->setRange(low, high);
+
+        ui->qCustomPlotCryptsyTrades->replot();
+
+        _cryptsyTrades->setLastPrev(_cryptsyTrades->getLastCurrent(QString()).toStdString());
+        _cryptsyTrades->setVolumePrev(_cryptsyTrades->getVolumeCurrent(QString()).toStdString());
+    } catch (exception ex) {
+        printf("PoolBrowser::cryptsyTrades: %s\r\n", ex.what());
+    }
+}
+void PoolBrowser::cryptsyOrders(QNetworkReply* response) {
+    try {
+        int z = 0;
+        double high = 0;
+        double low = 100000;
+        double sumBuys = 0;
+        double sumSells = 0;
+        double sumHighest = 0;
+
+        ui->qTreeWidgetCryptsyBuy->clear();
+        ui->qTreeWidgetCryptsyBuy->sortByColumn(0, Qt::DescendingOrder);
+        ui->qTreeWidgetCryptsyBuy->setSortingEnabled(true);
+
+        ui->qTreeWidgetCryptsySell->clear();
+        ui->qTreeWidgetCryptsySell->sortByColumn(0, Qt::AscendingOrder);
+        ui->qTreeWidgetCryptsySell->setSortingEnabled(true);
+
+        QString apiResponse = response->readAll();
+
+        apiResponse = apiResponse.replace("{\"success\":1,\"return\":{\"XNAN\":{\"marketid\":\"225\",\"label\":\"XNAN\\/BTC\",\"primaryname\":\"Nanite\",\"primarycode\":\"XNAN\",\"secondaryname\":\"BitCoin\",\"secondarycode\":\"BTC\",\"sellorders\":[", "");
+        QStringList qslApiResponse = apiResponse.split("],\"buyorders\":[");
+
+        QStringList qslApiResponseSells = qslApiResponse[0].replace("},{", "}{").split("{", QString::SkipEmptyParts);
+        QStringList qslApiResponseBuys = qslApiResponse[1].replace("]}}}", "").replace("},{", "}{").split("{", QString::SkipEmptyParts);
+
+        //Use shorest depth as limit and use buy length if they are the same
+        int depth = qslApiResponseBuys.length() > qslApiResponseSells.length()
+                    ? qslApiResponseSells.length() : qslApiResponseSells.length() > qslApiResponseBuys.length()
+                    ? qslApiResponseBuys.length() : qslApiResponseBuys.length();
+
+        //Prevent overflow by limiting depth to 50
+        //Also check for odd number of orders and drop the last one
+        //To avoid an overflow when there are less than 50 orders
+        depth = depth > 50
+                ? 50 : depth % 2 == 1
+                ? depth - 1 : depth;
+
+        QVector<double> xAxisBuys(depth), yAxisBuys(depth);
+        QVector<double> xAxisSells(depth), yAxisSells(depth);
+
+        for (int i = 0; i < depth; i++) {
+            mValue jsonResponse = new mValue();
+
+            //Fix missing leading brace caused by split string, otherwise it will not be recognized an an mObject
+            qslApiResponseBuys[i].replace("\"price", "{\"price");
+            qslApiResponseSells[i].replace("\"price", "{\"price");
+
+            //json_spirit does not handle null so make it "null"
+            qslApiResponseBuys[i].replace("null", "\"null\"");
+            qslApiResponseSells[i].replace("null", "\"null\"");
+
+            //Make sure the response is valid
+            if (read_string(qslApiResponseBuys[i].toStdString(), jsonResponse)) {
+                mObject jsonObjectBuys = jsonResponse.get_obj();
+
+                try {
+                    _cryptsyOrders->setQuantity(getPairValue(jsonObjectBuys, "quantity").get_str());
+                    _cryptsyOrders->setPrice(getPairValue(jsonObjectBuys, "price").get_str());
+                    _cryptsyOrders->setOrderType("Buy");
+                } catch (exception ex) {
+                    printf("PoolBrowser::cryptsyOrders: %s\r\n", ex.what()); //API did not return all needed data so skip this order
+                }
+
+                QTreeWidgetItem * qtBuys = new QTreeWidgetItem();
+
+                qtBuys->setText(0, _cryptsyOrders->getPrice(QString()));
+                qtBuys->setText(1, _cryptsyOrders->getQuantity(QString()));
+
+                ui->qTreeWidgetCryptsyBuy->addTopLevelItem(qtBuys);
+
+                sumBuys += _cryptsyOrders->getQuantity(double());
+                xAxisBuys[z] = _cryptsyOrders->getPrice(double()) * 100000000;
+                yAxisBuys[z] = sumBuys;
+            }
+
+            high = _cryptsyOrders->getPrice(double()) > high ? _cryptsyOrders->getPrice(double()) : high;
+            low = _cryptsyOrders->getPrice(double()) < low ? _cryptsyOrders->getPrice(double()) : low;
+
+            string WTF = qslApiResponseSells[i].toStdString();
+
+            //Make sure the response is valid
+            if (read_string(qslApiResponseSells[i].toStdString(), jsonResponse)) {
+                mObject jsonObjectSells = jsonResponse.get_obj();
+
+                try {
+                    _cryptsyOrders->setQuantity(getPairValue(jsonObjectSells, "quantity").get_str());
+                    _cryptsyOrders->setPrice(getPairValue(jsonObjectSells, "price").get_str());
+                    _cryptsyOrders->setOrderType("Sell");
+                } catch (exception ex) {
+                    printf("PoolBrowser::cryptsyOrders: %s\r\n", ex.what()); //API did not return all needed data so skip this order
+                }
+
+                QTreeWidgetItem * qtSells = new QTreeWidgetItem();
+
+                qtSells->setText(0, _cryptsyOrders->getPrice(QString()));
+                qtSells->setText(1, _cryptsyOrders->getQuantity(QString()));
+
+                ui->qTreeWidgetCryptsySell->addTopLevelItem(qtSells);
+
+                sumSells += _cryptsyOrders->getQuantity(double());
+                xAxisSells[z] = _cryptsyOrders->getPrice(double()) * 100000000;
+                yAxisSells[z] = sumSells;
+            }
+
+            high = _cryptsyOrders->getPrice(double()) > high ? _cryptsyOrders->getPrice(double()) : high;
+            low = _cryptsyOrders->getPrice(double()) < low ? _cryptsyOrders->getPrice(double()) : low;
+
+            z++;
+        }
+
+        high *=  100000000;
+        low *=  100000000;
+
+        sumHighest = sumBuys > sumSells ? sumBuys : sumBuys < sumSells ? sumSells : sumBuys;
+
+        ui->qCustomPlotCryptsyOrderDepth->graph(0)->setData(xAxisBuys, yAxisBuys);
+        ui->qCustomPlotCryptsyOrderDepth->graph(1)->setData(xAxisSells, yAxisSells);
+
+        ui->qCustomPlotCryptsyOrderDepth->graph(0)->setPen(QPen(QColor(34, 177, 76)));
+        ui->qCustomPlotCryptsyOrderDepth->graph(0)->setBrush(QBrush(QColor(34, 177, 76, 20)));
+        ui->qCustomPlotCryptsyOrderDepth->graph(1)->setPen(QPen(QColor(237, 24, 35)));
+        ui->qCustomPlotCryptsyOrderDepth->graph(1)->setBrush(QBrush(QColor(237, 24, 35, 20)));
+
+        ui->qCustomPlotCryptsyOrderDepth->xAxis->setRange(low, high);
+        ui->qCustomPlotCryptsyOrderDepth->yAxis->setRange(low, sumHighest);
+
+        ui->qCustomPlotCryptsyOrderDepth->replot();
+    } catch (exception ex) {
+        printf("PoolBrowser::cryptsyOrders: %s\r\n", ex.what());
+    }
+}
+
+const mValue& PoolBrowser::getPairValue(const mObject& obj, const string& name) {
+    mObject::const_iterator iter = obj.find(name);
+
+    assert(iter != obj.end());
+    assert(iter->first == name);
+
+    return iter->second;
+}
+
+void PoolBrowser::updateLabel(QLabel* qLabel, double d1, double d2, QString prefix, int decimalPlaces) {
+    qLabel->setText("");
+
+    if (d1 > d2) {
+        qLabel->setText(prefix + "<font color=\"green\"><b>" + QString::number(d1, 'f', decimalPlaces) + "</b></font>");
+    } else if (d1 < d2) {
+        qLabel->setText(prefix + "<font color=\"red\"><b>" + QString::number(d1, 'f', decimalPlaces) + "</b></font>");
+    } else {
+        qLabel->setText(prefix + QString::number(d1, 'f', decimalPlaces));
+    }
+}
+void PoolBrowser::updateLabel(QLabel* qLabel, double d1, double d2, QString prefix, QString suffix, int decimalPlaces) {
+    qLabel->setText("");
+
+    if (d1 > d2) {
+        qLabel->setText(prefix + "<font color=\"green\"><b>" + QString::number(d1, 'f', decimalPlaces) + suffix + "</b></font>");
+    } else if (d1 < d2) {
+        qLabel->setText(prefix + "<font color=\"red\"><b>" + QString::number(d1, 'f', decimalPlaces) + suffix + "</b></font>");
+    } else {
+        qLabel->setText(prefix + QString::number(d1, 'f', decimalPlaces) + suffix);
+    }
+}
+
+void PoolBrowser::setModel(ClientModel *model) {
+    this->model = model;
+}
+
+PoolBrowser::~PoolBrowser() {
+    delete ui;
+}
